@@ -1,23 +1,21 @@
 from fastapi import APIRouter
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+from app.agents.pipeline import run_pipeline
 
 router = APIRouter()
 
 
 class ScoreRequest(BaseModel):
-    address: str
-    recent_tx_count: int
-    recent_tx_volume: float
+    address: str = Field(min_length=1, max_length=128, description="Stellar address or account identifier")
+    recent_tx_count: int = Field(ge=0, description="Transaction count in the caller's recent activity window")
+    recent_tx_volume: float = Field(ge=0, description="Aggregate transaction volume in XLM for that window")
 
 
 @router.post("/score")
 def score_address(req: ScoreRequest):
-    """
-    Run the LangGraph risk-scoring pipeline on an address.
+    """Score the caller-supplied activity metrics with the prototype heuristic.
 
-    TODO(#issue): app/agents/pipeline.py is currently a stub that returns a
-    fixed score. It needs a real LangGraph graph with at least: a data-gather
-    node, a scoring node, and a decision node that decides whether to call
-    flag_anomaly on-chain.
+    This endpoint does not fetch chain data or submit a contract transaction.
     """
-    return {"address": req.address, "score": 0, "flagged": False}
+    return run_pipeline(req.address, req.recent_tx_count, req.recent_tx_volume)

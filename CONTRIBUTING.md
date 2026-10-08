@@ -1,4 +1,4 @@
-# Contributing to sorosentinel-backend
+# Contributing to sentinel-backend
 
 ## Setup
 ```
@@ -15,5 +15,5 @@ uvicorn app.main:app --reload
 - Update README.md if you changed a route's behavior.
 
 ## Related repos
-- sorosentinel-contract — the Soroban contract this service calls
-- sorosentinel-frontend — dashboard consuming this service's /events endpoint
+- sentinel-contract — the Soroban contract this service calls
+- sentinel-frontend — dashboard consuming this service's /events endpoint

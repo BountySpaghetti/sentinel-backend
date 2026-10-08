@@ -5,7 +5,7 @@ from app.routers import health, events, risk
 settings = get_settings()
 
 app = FastAPI(
-    title="SoroSentinel API",
+    title="Stellar Sentinel API",
     description="AI-agent risk monitoring layer for Soroban smart contracts.",
     version="0.1.0",
 )
