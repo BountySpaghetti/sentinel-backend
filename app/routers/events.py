@@ -1,20 +1,11 @@
-from fastapi import APIRouter
-from app.config import get_settings
+from fastapi import APIRouter, Query
+
+from app.stellar import list_flag_events
 
 router = APIRouter()
-settings = get_settings()
 
 
 @router.get("/")
-def list_events():
-    """
-    Return recent 'flagged' events emitted by the Stellar Sentinel contract.
-
-    TODO(#issue): this currently returns a hardcoded placeholder. It needs
-    to call the Soroban RPC getEvents endpoint, filter by the contract's
-    'flagged' topic, and paginate results.
-    """
-    return {
-        "events": [],
-        "note": "not yet wired to Soroban RPC — see open issue",
-    }
+def list_events(limit: int = Query(20, ge=1, le=100), cursor: str | None = Query(None, min_length=1, max_length=512)):
+    """Read recent `flagged` events from the configured Soroban contract."""
+    return list_flag_events(limit=limit, cursor=cursor)

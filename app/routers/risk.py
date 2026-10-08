@@ -1,21 +1,17 @@
 from fastapi import APIRouter
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
-from app.agents.pipeline import run_pipeline
+from app.stellar import score_account
 
 router = APIRouter()
 
 
 class ScoreRequest(BaseModel):
-    address: str = Field(min_length=1, max_length=128, description="Stellar address or account identifier")
-    recent_tx_count: int = Field(ge=0, description="Transaction count in the caller's recent activity window")
-    recent_tx_volume: float = Field(ge=0, description="Aggregate transaction volume in XLM for that window")
+    model_config = ConfigDict(extra="forbid")
+    address: str = Field(pattern=r"^G[A-Z2-7]{55}$", description="Classic Stellar account public key")
 
 
 @router.post("/score")
 def score_address(req: ScoreRequest):
-    """Score the caller-supplied activity metrics with the prototype heuristic.
-
-    This endpoint does not fetch chain data or submit a contract transaction.
-    """
-    return run_pipeline(req.address, req.recent_tx_count, req.recent_tx_volume)
+    """Screen a Stellar account using its recent Horizon operations."""
+    return score_account(req.address)
