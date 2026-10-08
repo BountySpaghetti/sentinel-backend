@@ -33,6 +33,8 @@ class Settings(BaseSettings):
     def trusted_proxy_networks(self):
         return [ip_network(item.strip(), strict=False)
                 for item in self.trusted_proxy_cidrs.split(",") if item.strip()]
+    event_store_path: str = "./data/events.sqlite3"
+    event_ingest_interval_seconds: int = Field(default=30, gt=0, le=86_400)
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

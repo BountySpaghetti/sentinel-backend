@@ -1,16 +1,48 @@
+import asyncio
+import logging
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import get_settings
 from app.middleware.rate_limit import ScreeningRateLimitMiddleware
-from app.stellar import network_status
+from app.stellar import network_status, sync_flag_events
 from app.routers import accounts, health, events, risk
+from app.event_store import get_event_store
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
+
+
+async def _ingest_events_forever():
+    if not settings.contract_id:
+        return
+    store = get_event_store(settings.event_store_path)
+    while True:
+        try:
+            await asyncio.to_thread(sync_flag_events, store, settings)
+        except Exception as exc:
+            logger.warning("Soroban event ingestion failed (%s)", type(exc).__name__)
+        await asyncio.sleep(settings.event_ingest_interval_seconds)
+
+
+@asynccontextmanager
+async def lifespan(_app):
+    task = asyncio.create_task(_ingest_events_forever())
+    try:
+        yield
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
 app = FastAPI(
     title="Stellar Sentinel API",
     description="Read-only Stellar account screening and Soroban contract event API.",
     version="0.1.0",
+    lifespan=lifespan,
 )
 
 app.add_middleware(

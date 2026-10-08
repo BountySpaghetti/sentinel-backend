@@ -16,7 +16,7 @@ flowchart LR
   Contract[Soroban Sentinel contract] -->|flagged events| RPC
 ```
 
-The backend is an event reader, not a transaction writer. The example configuration points to the current Testnet deployment. Set `CONTRACT_ID` to a deployed contract on the selected network; without it, `/events` returns HTTP 503 rather than fabricated data.
+The backend is an event reader, not a transaction writer. The example configuration points to the current Testnet deployment. Set `CONTRACT_ID` to a deployed contract on the selected network; without it, `/events` returns HTTP 503 rather than fabricated data. The service indexes new events into a local SQLite database while running, and `/events` returns the stored history with the existing response fields.
 
 `GET /accounts/{address}/operations?limit=20&cursor=...` returns a page of normalized Horizon operations. The page contains the operation ID/type, creation time, transaction hash, participating accounts, and an `amounts` array. Each amount keeps its own asset type, code, and issuer; path payments may return separate source and destination amounts. `next_cursor` is an opaque token for the following page and is `null` when the current page is short. Page size is limited to 1–100. These values are descriptive activity data and do not alter the risk score.
 
@@ -77,8 +77,12 @@ Copy `.env.example` to `.env`; environment variables override file values. Use m
 | `TRUSTED_PROXY_CIDRS` | empty | Comma-separated IPs/CIDRs of reverse proxies allowed to supply `X-Forwarded-For`. |
 
 Only `POST /risk/score` is rate-limited; health, events, and network status remain available. A client that exceeds its quota receives HTTP 429 with `Retry-After`, `X-RateLimit-Limit`, and `X-RateLimit-Remaining` headers. The limiter uses an in-memory sliding window per application process, so deployments with multiple workers or replicas should enforce a shared limit at their gateway. Forwarded client addresses are used only when the direct peer matches `TRUSTED_PROXY_CIDRS`; configure the exact proxy ranges and ensure the proxy overwrites or appends `X-Forwarded-For` correctly. With no trusted ranges configured, the middleware uses the direct peer address and ignores forwarded headers.
+| `EVENT_STORE_PATH` | `./data/events.sqlite3` | SQLite file used for indexed Soroban flag history and the resume cursor. |
+| `EVENT_INGEST_INTERVAL_SECONDS` | `30` | Delay between event-indexing polls while the app is running. |
 
 Do not commit `.env`, account secrets, signing keys, or tokens. The current service requires no secrets.
+
+The SQLite database creates `flag_events(scope, event_id, ledger, created_at, agent, subject, score_json, contract_id, tx_hash)` and `ingestion_state(scope, cursor)` automatically. The `(scope, event_id)` primary key makes replay idempotent; scope is the configured network and contract. The service stores the RPC resume cursor and continues after restarts. Back up `EVENT_STORE_PATH` along with application config; deleting or restoring an older database makes ingestion resume from that database's cursor. Local indexed history begins with the RPC provider's current retained window and only preserves events observed after indexing starts; it cannot recover events already pruned upstream. If RPC is temporarily unavailable, `/events` serves indexed records and marks `source.ingestion_status` as `stale`. For multiple application replicas, use one ingestion worker and a supported shared SQLite volume; SQLite is not intended as a network database. Schema is initialized on startup; schema changes should be shipped with explicit migrations.
 
 ## Data and scoring limits
 

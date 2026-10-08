@@ -282,7 +282,8 @@ def _native(value):
     return value
 
 
-def list_flag_events(limit: int, cursor: str | None = None, settings: Settings | None = None) -> dict:
+def fetch_flag_event_page(limit: int, cursor: str | None = None,
+                          settings: Settings | None = None) -> tuple[list[dict], str | None]:
     settings = settings or get_settings()
     if not settings.contract_id:
         raise HTTPException(status_code=503, detail="CONTRACT_ID is required to read Stellar Sentinel on-chain events")
@@ -308,6 +309,20 @@ def list_flag_events(limit: int, cursor: str | None = None, settings: Settings |
                        "created_at": event.get("ledgerClosedAt"), "agent": topics[1] if len(topics) > 1 else None,
                        "subject": topics[2] if len(topics) > 2 else None, "score": _native(event.get("value")),
                        "contract_id": event.get("contractId", settings.contract_id), "tx_hash": event.get("txHash")})
-    return {"events": output, "next_cursor": result.get("cursor"),
+    return output, result.get("cursor")
+
+
+def list_flag_events(limit: int, cursor: str | None = None, settings: Settings | None = None) -> dict:
+    settings = settings or get_settings()
+    output, next_cursor = fetch_flag_event_page(limit, cursor, settings)
+    return {"events": output, "next_cursor": next_cursor,
             "source": {"rpc_url": settings.soroban_rpc_url, "network": settings.network_passphrase,
                        "contract_id": settings.contract_id}}
+
+
+def sync_flag_events(store, settings: Settings | None = None) -> None:
+    settings = settings or get_settings()
+    scope = f"{settings.network_passphrase}:{settings.contract_id}"
+    cursor = store.ingestion_cursor(scope)
+    events, next_cursor = fetch_flag_event_page(limit=100, cursor=cursor, settings=settings)
+    store.save_page(events, next_cursor, scope)
