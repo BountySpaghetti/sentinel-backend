@@ -1,5 +1,6 @@
 from functools import lru_cache
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -14,6 +15,8 @@ class Settings(BaseSettings):
     activity_window_days: int = 7
     events_lookback_ledgers: int = 50_000
     cors_origins: str = "http://localhost:3000"
+    event_store_path: str = "./data/events.sqlite3"
+    event_ingest_interval_seconds: int = Field(default=30, gt=0, le=86_400)
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
