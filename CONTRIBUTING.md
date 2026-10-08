@@ -15,5 +15,5 @@ uvicorn app.main:app --reload
 - Update README.md if you changed a route's behavior.
 
 ## Related repos
-- sentinel-contract — the Soroban contract this service calls
-- sentinel-frontend — dashboard consuming this service's /events endpoint
+- [sentinel-contract](https://github.com/Stellar-Sentinel/sentinel-contracts) — emits the `flagged` events this service reads.
+- [sentinel-frontend](https://github.com/Stellar-Sentinel/sentinel-frontend) — dashboard consuming this service's screening, network, and event endpoints.
