@@ -70,6 +70,11 @@ Copy `.env.example` to `.env`; environment variables override file values. Use m
 | `ACTIVITY_WINDOW_DAYS` | `7` | Recent activity screening window. |
 | `EVENTS_LOOKBACK_LEDGERS` | `50000` | First-page event search window, clamped to RPC retention. |
 | `CORS_ORIGINS` | `http://localhost:3000` | Comma-separated browser origins allowed to call the API. |
+| `SCREENING_RATE_LIMIT_REQUESTS` | `30` | Maximum account-screening requests per client in the configured window. |
+| `SCREENING_RATE_LIMIT_WINDOW_SECONDS` | `60` | Sliding-window length for screening requests. |
+| `TRUSTED_PROXY_CIDRS` | empty | Comma-separated IPs/CIDRs of reverse proxies allowed to supply `X-Forwarded-For`. |
+
+Only `POST /risk/score` is rate-limited; health, events, and network status remain available. A client that exceeds its quota receives HTTP 429 with `Retry-After`, `X-RateLimit-Limit`, and `X-RateLimit-Remaining` headers. The limiter uses an in-memory sliding window per application process, so deployments with multiple workers or replicas should enforce a shared limit at their gateway. Forwarded client addresses are used only when the direct peer matches `TRUSTED_PROXY_CIDRS`; configure the exact proxy ranges and ensure the proxy overwrites or appends `X-Forwarded-For` correctly. With no trusted ranges configured, the middleware uses the direct peer address and ignores forwarded headers.
 
 Do not commit `.env`, account secrets, signing keys, or tokens. The current service requires no secrets.
 

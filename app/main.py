@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import get_settings
+from app.middleware.rate_limit import ScreeningRateLimitMiddleware
 from app.stellar import network_status
 from app.routers import health, events, risk
 
@@ -13,11 +14,19 @@ app = FastAPI(
 )
 
 app.add_middleware(
+    ScreeningRateLimitMiddleware,
+    requests=settings.screening_rate_limit_requests,
+    window_seconds=settings.screening_rate_limit_window_seconds,
+    trusted_proxies=settings.trusted_proxy_networks,
+)
+
+app.add_middleware(
     CORSMiddleware,
     allow_origins=[origin.strip() for origin in settings.cors_origins.split(",") if origin.strip()],
     allow_credentials=False,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization"],
+    expose_headers=["Retry-After", "X-RateLimit-Limit", "X-RateLimit-Remaining"],
 )
 
 app.include_router(health.router)
@@ -32,4 +41,3 @@ def get_network_status():
 
 # TODO(#issue): no request logging middleware yet — every request should be
 # logged as structured JSON (method, path, status, latency_ms).
-# TODO(#issue): no auth/rate-limiting middleware yet — all routes are open.
