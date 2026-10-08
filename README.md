@@ -16,7 +16,7 @@ flowchart LR
   Contract[Soroban Sentinel contract] -->|flagged events| RPC
 ```
 
-The backend is an event reader, not a transaction writer. `CONTRACT_ID` is required for `/events`; without it, the route returns HTTP 503 rather than fabricated data.
+The backend is an event reader, not a transaction writer. The example configuration points to the current Testnet deployment. Set `CONTRACT_ID` to a deployed contract on the selected network; without it, `/events` returns HTTP 503 rather than fabricated data.
 
 ## Project layout
 
@@ -59,7 +59,7 @@ Copy `.env.example` to `.env`; environment variables override file values. Use m
 | `HORIZON_URL` | `https://horizon-testnet.stellar.org` | Account and operations data source. |
 | `SOROBAN_RPC_URL` | `https://soroban-testnet.stellar.org` | Network status and contract event source. |
 | `NETWORK_PASSPHRASE` | `Test SDF Network ; September 2015` | Network identifier returned to the UI. |
-| `CONTRACT_ID` | empty | Deployed contract ID; required for `/events`. |
+| `CONTRACT_ID` | Stellar Sentinel Testnet contract | Deployed contract ID for `/events`; use a contract on the configured network. |
 | `ENVIRONMENT` | `development` | Runtime environment label. |
 | `REQUEST_TIMEOUT_SECONDS` | `8.0` | Outbound HTTP timeout. |
 | `OPERATION_SCAN_LIMIT` | `200` | Maximum recent operations examined (Horizon limit is 200). |
