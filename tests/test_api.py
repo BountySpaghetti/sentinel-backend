@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timezone
 
 import httpx
@@ -17,6 +18,21 @@ def test_health_and_cors():
     assert client.get("/live").json() == {"status": "ok"}
     response = client.options("/risk/score", headers={"Origin": "http://localhost:3000", "Access-Control-Request-Method": "POST"})
     assert response.headers["access-control-allow-origin"] == "http://localhost:3000"
+
+
+def test_request_log_uses_route_template_without_sensitive_inputs(caplog):
+    address = "G" + "Z" * 55
+    with caplog.at_level("INFO", logger="sentinel.request"):
+        response = client.get(f"/missing/{address}?token=do-not-log")
+
+    assert response.status_code == 404
+    log_record = json.loads(caplog.records[-1].message)
+    assert log_record["method"] == "GET"
+    assert log_record["route"] == "<unmatched>"
+    assert log_record["status"] == 404
+    assert address not in caplog.text
+    assert "do-not-log" not in caplog.text
+    assert "token" not in caplog.text
 
 
 def test_readiness_reports_each_dependency(monkeypatch):
