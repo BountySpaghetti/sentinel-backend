@@ -83,3 +83,5 @@ Do not commit `.env`, account secrets, signing keys, or tokens. The current serv
 ## Data and scoring limits
 
 The score uses a bounded sample of recent Horizon operations, up to 200, and fixed baseline thresholds. It is not a trained model. RPC event history is provider-limited and is not a complete archive. Configure a persistent indexer for long-term event history.
+
+The `/risk/score` response includes an `assets` array with each Horizon balance and its asset identity, plus `metrics.trustline_count`. Issued-asset balances remain separate from the native XLM balance and do not affect the screening score. Malformed balance records are skipped.

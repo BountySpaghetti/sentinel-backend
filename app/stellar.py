@@ -1,6 +1,7 @@
 """Read-only clients for Horizon and Stellar RPC."""
 from datetime import datetime, timedelta, timezone
 import base64
+import math
 
 import httpx
 from fastapi import HTTPException
@@ -20,6 +21,49 @@ def _get(url: str, params: dict | None = None, settings: Settings | None = None)
         raise HTTPException(status_code=502, detail="Horizon request failed") from exc
     except (httpx.HTTPError, ValueError) as exc:
         raise HTTPException(status_code=503, detail="Unable to reach the configured Stellar data service") from exc
+
+
+def _asset_context(account: dict) -> tuple[list[dict], int, float]:
+    assets = []
+    trustline_count = 0
+    native_balance = 0.0
+    balances = account.get("balances", [])
+    if not isinstance(balances, list):
+        return assets, trustline_count, native_balance
+
+    for balance in balances:
+        if not isinstance(balance, dict):
+            continue
+        asset_type = balance.get("asset_type")
+        amount = balance.get("balance")
+        if not isinstance(asset_type, str) or amount is None:
+            continue
+        try:
+            numeric_amount = float(amount)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(numeric_amount):
+            continue
+
+        if asset_type == "native":
+            native_balance = numeric_amount
+            asset = {"type": "native", "code": "XLM"}
+        else:
+            asset = {"type": asset_type}
+            if balance.get("asset_code") is not None:
+                asset["code"] = balance["asset_code"]
+            if balance.get("asset_issuer") is not None:
+                asset["issuer"] = balance["asset_issuer"]
+            if asset_type.startswith("credit_") and not (
+                asset.get("code") and asset.get("issuer")
+            ):
+                continue
+            if balance.get("liquidity_pool_id") is not None:
+                asset["liquidity_pool_id"] = balance["liquidity_pool_id"]
+            trustline_count += 1
+        assets.append({"asset": asset, "balance": str(amount)})
+
+    return assets, trustline_count, native_balance
 
 
 def _rpc(method: str, params: dict, settings: Settings | None = None) -> dict:
@@ -106,8 +150,7 @@ def score_account(address: str, settings: Settings | None = None) -> dict:
         add_signal("new_account_activity", "Low sequence account with observed activity", seq, "review", 15,
                    "The account has a low sequence number; this alone is not evidence of malicious behavior.")
 
-    native_balance = next((float(item["balance"]) for item in account.get("balances", [])
-                           if item.get("asset_type") == "native" and item.get("balance") is not None), 0.0)
+    assets, trustline_count, native_balance = _asset_context(account)
 
     score = min(score, 100)
     threshold = 70
@@ -121,7 +164,9 @@ def score_account(address: str, settings: Settings | None = None) -> dict:
         "metrics": {"operations_scanned": len(records), "operations_in_window": len(recent),
                     "transfers_in_window": transfers, "transfer_volume_xlm": round(volume, 7),
                     "distinct_counterparties": len(counterparties), "account_sequence": seq,
-                    "native_xlm_balance": round(native_balance, 7), "window_days": settings.activity_window_days},
+                    "native_xlm_balance": round(native_balance, 7), "trustline_count": trustline_count,
+                    "window_days": settings.activity_window_days},
+        "assets": assets,
         "source": {"horizon_url": settings.horizon_url.rstrip("/"), "network": settings.network_passphrase,
                    "observed_at": now.isoformat()},
         "as_of": now.isoformat(),
