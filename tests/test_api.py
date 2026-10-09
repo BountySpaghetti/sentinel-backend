@@ -20,6 +20,18 @@ def test_health_and_cors():
     assert response.headers["access-control-allow-origin"] == "http://localhost:3000"
 
 
+def test_request_id_is_propagated_or_generated():
+    accepted = client.get("/health", headers={"X-Request-ID": "trace_123-abc"})
+    assert accepted.headers["x-request-id"] == "trace_123-abc"
+
+    generated = client.get("/health")
+    assert len(generated.headers["x-request-id"]) == 32
+
+    rejected = client.get("/health", headers={"X-Request-ID": "bad id"})
+    assert rejected.headers["x-request-id"] != "bad id"
+    assert len(rejected.headers["x-request-id"]) == 32
+
+
 def test_request_log_uses_route_template_without_sensitive_inputs(caplog):
     address = "G" + "Z" * 55
     with caplog.at_level("INFO", logger="sentinel.request"):

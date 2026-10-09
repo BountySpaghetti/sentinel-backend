@@ -4,6 +4,8 @@
 
 Read-only FastAPI service for screening Stellar accounts and reading Soroban contract events. It fetches account activity from Horizon, exposes network status and events from Stellar RPC, and does not hold signing keys or submit transactions. Screening scores are transparent heuristics, not proof of fraud or financial/compliance advice. The app reuses a bounded HTTP connection pool for the lifetime of the process and closes it during shutdown.
 
+Every HTTP response includes `X-Request-ID`. A supplied ID is reused only when it is 1–64 ASCII letters, digits, dots, underscores, or hyphens; otherwise the service generates a UUID and uses the selected value for request correlation.
+
 ## Health probes
 
 `GET /health` and `GET /live` are dependency-free liveness checks. `GET /ready` probes the configured Horizon fee-stats endpoint and Soroban RPC health method using `REQUEST_TIMEOUT_SECONDS`. It returns HTTP 200 when both are reachable, or HTTP 503 with a per-dependency `ok`/`unavailable` status when either is degraded. Upstream exception details are not included in the response.
