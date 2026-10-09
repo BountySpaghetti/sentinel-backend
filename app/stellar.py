@@ -104,12 +104,19 @@ def score_account(address: str, settings: Settings | None = None) -> dict:
     window_start = now - timedelta(days=settings.activity_window_days)
     ops_url = f"{settings.horizon_url.rstrip('/')}/accounts/{address}/operations"
     ops = _get(ops_url, {"limit": min(settings.operation_scan_limit, 200), "order": "desc", "include_failed": "false"}, settings)
-    records = ops.get("_embedded", {}).get("records", [])
+    embedded = ops.get("_embedded")
+    records = embedded.get("records", []) if isinstance(embedded, dict) else []
+    if not isinstance(records, list):
+        records = []
     recent = []
     for op in records:
+        if not isinstance(op, dict) or not isinstance(op.get("created_at"), str):
+            continue
         try:
             created = datetime.fromisoformat(op["created_at"].replace("Z", "+00:00"))
-        except (KeyError, ValueError):
+        except (ValueError, OverflowError):
+            continue
+        if created.tzinfo is None:
             continue
         if created >= window_start:
             recent.append(op)
