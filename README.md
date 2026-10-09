@@ -66,7 +66,7 @@ Copy `.env.example` to `.env`; environment variables override file values. Use m
 | `CONTRACT_ID` | Stellar Sentinel Testnet contract | Deployed contract ID for `/events`; use a contract on the configured network. |
 | `ENVIRONMENT` | `development` | Runtime environment label. |
 | `REQUEST_TIMEOUT_SECONDS` | `8.0` | Outbound HTTP timeout. |
-| `OPERATION_SCAN_LIMIT` | `200` | Maximum recent operations examined (Horizon limit is 200). |
+| `OPERATION_SCAN_LIMIT` | `200` | Maximum total operations examined across Horizon pages; hard maximum is 1,000 and each page is at most 200. |
 | `ACTIVITY_WINDOW_DAYS` | `7` | Recent activity screening window. |
 | `EVENTS_LOOKBACK_LEDGERS` | `50000` | First-page event search window, clamped to RPC retention. |
 | `CORS_ORIGINS` | `http://localhost:3000` | Comma-separated browser origins allowed to call the API. |
@@ -75,4 +75,4 @@ Do not commit `.env`, account secrets, signing keys, or tokens. The current serv
 
 ## Data and scoring limits
 
-The score uses a bounded sample of recent Horizon operations, up to 200, and fixed baseline thresholds. It is not a trained model. RPC event history is provider-limited and is not a complete archive. Configure a persistent indexer for long-term event history.
+The score uses a bounded sample of recent Horizon operations, up to 1,000 across pages, and fixed baseline thresholds. The response's `activity_sample` reports the total cap, actual records scanned, and whether the cap may have truncated older activity. It is not a trained model. RPC event history is provider-limited and is not a complete archive. Configure a persistent indexer for long-term event history.

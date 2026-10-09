@@ -7,6 +7,45 @@ from fastapi import HTTPException
 
 from app.config import Settings, get_settings
 
+MAX_OPERATION_SCAN_LIMIT = 1_000
+HORIZON_OPERATION_PAGE_SIZE = 200
+
+
+def _scan_account_operations(address: str, settings: Settings) -> tuple[list[dict], int, bool]:
+    scan_limit = max(0, min(settings.operation_scan_limit, MAX_OPERATION_SCAN_LIMIT))
+    if scan_limit == 0:
+        return [], scan_limit, False
+
+    url = f"{settings.horizon_url.rstrip('/')}/accounts/{address}/operations"
+    records = []
+    cursor = None
+    may_be_incomplete = False
+    while len(records) < scan_limit:
+        page_limit = min(HORIZON_OPERATION_PAGE_SIZE, scan_limit - len(records))
+        params = {"limit": page_limit, "order": "desc", "include_failed": "false"}
+        if cursor is not None:
+            params["cursor"] = cursor
+        payload = _get(url, params=params, settings=settings)
+        page = payload.get("_embedded", {}).get("records", [])
+        page_records = page[:page_limit]
+        if not page_records:
+            break
+        records.extend(page_records)
+
+        if len(records) >= scan_limit:
+            may_be_incomplete = len(page) >= page_limit
+            break
+        if len(page) < page_limit:
+            break
+
+        next_cursor = page_records[-1].get("id")
+        if next_cursor is None or str(next_cursor) == cursor:
+            may_be_incomplete = True
+            break
+        cursor = str(next_cursor)
+
+    return records, scan_limit, may_be_incomplete
+
 
 def _get(url: str, params: dict | None = None, settings: Settings | None = None) -> dict:
     settings = settings or get_settings()
@@ -46,9 +85,7 @@ def score_account(address: str, settings: Settings | None = None) -> dict:
     account = _get(f"{settings.horizon_url.rstrip('/')}/accounts/{address}", settings=settings)
     now = datetime.now(timezone.utc)
     window_start = now - timedelta(days=settings.activity_window_days)
-    ops_url = f"{settings.horizon_url.rstrip('/')}/accounts/{address}/operations"
-    ops = _get(ops_url, {"limit": min(settings.operation_scan_limit, 200), "order": "desc", "include_failed": "false"}, settings)
-    records = ops.get("_embedded", {}).get("records", [])
+    records, scan_limit, may_be_incomplete = _scan_account_operations(address, settings)
     recent = []
     for op in records:
         try:
@@ -122,6 +159,11 @@ def score_account(address: str, settings: Settings | None = None) -> dict:
                     "transfers_in_window": transfers, "transfer_volume_xlm": round(volume, 7),
                     "distinct_counterparties": len(counterparties), "account_sequence": seq,
                     "native_xlm_balance": round(native_balance, 7), "window_days": settings.activity_window_days},
+        "activity_sample": {
+            "operations_scanned": len(records),
+            "scan_limit": scan_limit,
+            "may_be_incomplete": may_be_incomplete,
+        },
         "source": {"horizon_url": settings.horizon_url.rstrip("/"), "network": settings.network_passphrase,
                    "observed_at": now.isoformat()},
         "as_of": now.isoformat(),
