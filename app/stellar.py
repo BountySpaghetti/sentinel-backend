@@ -47,7 +47,10 @@ def _rpc(method: str, params: dict, settings: Settings | None = None) -> dict:
         raise HTTPException(status_code=502, detail="Soroban RPC returned an invalid response")
     if payload.get("error"):
         raise HTTPException(status_code=502, detail="Soroban RPC returned an error")
-    return payload.get("result", {})
+    result = payload.get("result", {})
+    if not isinstance(result, dict):
+        raise HTTPException(status_code=502, detail="Soroban RPC returned an invalid result")
+    return result
 
 
 def score_account(address: str, settings: Settings | None = None) -> dict:
