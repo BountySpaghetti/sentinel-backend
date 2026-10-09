@@ -271,6 +271,7 @@ def score_account(address: str, settings: Settings | None = None) -> dict:
         "risk_level": "high" if score >= threshold else "elevated" if score >= settings.risk_elevated_score_threshold else "low",
         "threshold": threshold,
         "threshold_exceeded": score >= threshold,
+        "scoring_policy_version": settings.risk_policy_version,
         "signals": signals,
         "metrics": {"operations_scanned": len(records), "operations_in_window": len(recent),
                     "transfers_in_window": transfers, "transfer_volume_xlm": round(volume, 7),

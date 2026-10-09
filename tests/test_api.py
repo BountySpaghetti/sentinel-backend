@@ -95,6 +95,16 @@ def test_score_uses_horizon_data_and_returns_bounded_explainable_signals(monkeyp
     assert client.post("/risk/score", json={"address": ADDRESS, "recent_tx_count": 10}).status_code == 422
 
 
+def test_screening_response_includes_configured_policy_version(monkeypatch):
+    monkeypatch.setattr(stellar, "_get", lambda url, params=None, settings=None: (
+        {"sequence": "10", "balances": []}
+        if url.endswith("/accounts/" + ADDRESS)
+        else {"_embedded": {"records": []}}
+    ))
+
+    result = stellar.score_account(ADDRESS, settings=Settings(risk_policy_version="2.3.1"))
+
+    assert result["scoring_policy_version"] == "2.3.1"
 def test_risk_thresholds_and_weights_are_configurable_and_bounded(monkeypatch):
     recent = datetime.now(timezone.utc).isoformat()
     monkeypatch.setattr(stellar, "_get", lambda url, params=None, settings=None: (
