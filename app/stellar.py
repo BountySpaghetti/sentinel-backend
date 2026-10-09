@@ -81,6 +81,15 @@ def _post_response(url: str, payload: dict, settings: Settings):
     return httpx.post(url, json=payload, timeout=settings.request_timeout_seconds)
 
 
+def _finite_float(value) -> float:
+    """Parse an upstream numeric field without allowing NaN or infinity through."""
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+    return parsed if math.isfinite(parsed) else 0.0
+
+
 def _get(url: str, params: dict | None = None, settings: Settings | None = None) -> dict:
     settings = settings or get_settings()
     try:
@@ -211,14 +220,11 @@ def score_account(address: str, settings: Settings | None = None) -> dict:
         for account_id in (source, destination, op.get("from")):
             if account_id and account_id != address:
                 counterparties.add(account_id)
-        try:
-            # Only native XLM amounts are included; asset amounts are never mixed into XLM totals.
-            if op.get("type") == "create_account":
-                volume += abs(float(op.get("starting_balance", "0")))
-            elif op.get("asset_type") in (None, "native"):
-                volume += abs(float(op.get("amount", "0")))
-        except (TypeError, ValueError):
-            pass
+        # Only native XLM amounts are included; asset amounts are never mixed into XLM totals.
+        if op.get("type") == "create_account":
+            volume += abs(_finite_float(op.get("starting_balance", "0")))
+        elif op.get("asset_type") in (None, "native"):
+            volume += abs(_finite_float(op.get("amount", "0")))
         transfers += 1
 
     signals = []
