@@ -14,13 +14,18 @@ def _get(url: str, params: dict | None = None, settings: Settings | None = None)
     try:
         response = httpx.get(url, params=params, timeout=settings.request_timeout_seconds)
         response.raise_for_status()
-        return response.json()
+        payload = response.json()
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 404:
             raise HTTPException(status_code=404, detail="Stellar account was not found on the configured network") from exc
         raise HTTPException(status_code=502, detail="Horizon request failed") from exc
-    except (httpx.HTTPError, ValueError) as exc:
+    except httpx.HTTPError as exc:
         raise HTTPException(status_code=503, detail="Unable to reach the configured Stellar data service") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail="Horizon returned invalid JSON") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=502, detail="Horizon returned an invalid response")
+    return payload
 
 
 def _asset_context(account: dict) -> tuple[list[dict], int, float]:
@@ -78,11 +83,18 @@ def _rpc(method: str, params: dict, settings: Settings | None = None) -> dict:
         payload = response.json()
     except httpx.HTTPStatusError as exc:
         raise HTTPException(status_code=502, detail="Soroban RPC request failed") from exc
-    except (httpx.HTTPError, ValueError) as exc:
+    except httpx.HTTPError as exc:
         raise HTTPException(status_code=503, detail="Unable to reach configured Soroban RPC") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail="Soroban RPC returned invalid JSON") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=502, detail="Soroban RPC returned an invalid response")
     if payload.get("error"):
         raise HTTPException(status_code=502, detail="Soroban RPC returned an error")
-    return payload.get("result", {})
+    result = payload.get("result", {})
+    if not isinstance(result, dict):
+        raise HTTPException(status_code=502, detail="Soroban RPC returned an invalid result")
+    return result
 
 
 def score_account(address: str, settings: Settings | None = None) -> dict:
