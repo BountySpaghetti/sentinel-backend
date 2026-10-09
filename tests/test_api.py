@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 
+import httpx
 from fastapi.testclient import TestClient
 from fastapi import HTTPException
 
@@ -104,6 +105,47 @@ def test_network_status_includes_rpc_retention(monkeypatch):
     result = stellar.network_status(Settings())
     assert result["ledger_retention_window"] == 120960
     assert result["oldest_ledger"] == 50
+
+
+def test_upstream_requests_use_one_managed_client():
+    class FakeClient:
+        def __init__(self):
+            self.calls = []
+            self.closed = False
+
+        def get(self, url, **kwargs):
+            self.calls.append(("GET", url, kwargs))
+            return httpx.Response(200, json={"fee_stats": True})
+
+        def post(self, url, **kwargs):
+            self.calls.append(("POST", url, kwargs))
+            return httpx.Response(200, json={"result": {"status": "healthy"}})
+
+        def close(self):
+            self.closed = True
+
+    settings = Settings(request_timeout_seconds=2.5)
+    fake_client = FakeClient()
+    stellar.set_http_client(fake_client)
+    try:
+        stellar._get("https://horizon.example/fee_stats", settings=settings)
+        stellar._rpc("getHealth", {}, settings=settings)
+    finally:
+        stellar.close_http_client()
+
+    assert [call[0] for call in fake_client.calls] == ["GET", "POST"]
+    assert all(call[2]["timeout"] == 2.5 for call in fake_client.calls)
+    assert fake_client.closed is True
+
+
+def test_application_lifespan_closes_shared_client():
+    with TestClient(app):
+        shared_client = stellar._http_client
+        assert shared_client is not None
+        assert not shared_client.is_closed
+
+    assert shared_client.is_closed
+    assert stellar._http_client is None
 
 
 def test_events_cursor_skips_health_and_reuses_cursor(monkeypatch):

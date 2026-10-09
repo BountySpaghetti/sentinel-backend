@@ -8,11 +8,41 @@ from fastapi import HTTPException
 
 from app.config import Settings, get_settings
 
+_http_client: httpx.Client | None = None
+
+
+def set_http_client(client: httpx.Client) -> None:
+    """Install the application-scoped connection pool used by upstream calls."""
+    global _http_client
+    if _http_client is not None and _http_client is not client:
+        _http_client.close()
+    _http_client = client
+
+
+def close_http_client() -> None:
+    """Close and clear the application-scoped connection pool."""
+    global _http_client
+    client, _http_client = _http_client, None
+    if client is not None:
+        client.close()
+
+
+def _get_response(url: str, params: dict | None, settings: Settings):
+    if _http_client is not None:
+        return _http_client.get(url, params=params, timeout=settings.request_timeout_seconds)
+    return httpx.get(url, params=params, timeout=settings.request_timeout_seconds)
+
+
+def _post_response(url: str, payload: dict, settings: Settings):
+    if _http_client is not None:
+        return _http_client.post(url, json=payload, timeout=settings.request_timeout_seconds)
+    return httpx.post(url, json=payload, timeout=settings.request_timeout_seconds)
+
 
 def _get(url: str, params: dict | None = None, settings: Settings | None = None) -> dict:
     settings = settings or get_settings()
     try:
-        response = httpx.get(url, params=params, timeout=settings.request_timeout_seconds)
+        response = _get_response(url, params, settings)
         response.raise_for_status()
         payload = response.json()
     except httpx.HTTPStatusError as exc:
@@ -74,10 +104,10 @@ def _asset_context(account: dict) -> tuple[list[dict], int, float]:
 def _rpc(method: str, params: dict, settings: Settings | None = None) -> dict:
     settings = settings or get_settings()
     try:
-        response = httpx.post(
+        response = _post_response(
             settings.soroban_rpc_url,
-            json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
-            timeout=settings.request_timeout_seconds,
+            {"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
+            settings,
         )
         response.raise_for_status()
         payload = response.json()
