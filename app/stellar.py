@@ -1,52 +1,59 @@
 """Read-only clients for Horizon and Stellar RPC."""
 from datetime import datetime, timedelta, timezone
 import base64
+import copy
+from collections import OrderedDict
+import re
+from urllib.parse import urlsplit, urlunsplit
 from email.utils import parsedate_to_datetime
 import time
 import math
+import threading
 
 import httpx
 from fastapi import HTTPException
 
 from app.config import Settings, get_settings
 
-MAX_OPERATION_SCAN_LIMIT = 1_000
-HORIZON_OPERATION_PAGE_SIZE = 200
-
-
-def _scan_account_operations(address: str, settings: Settings) -> tuple[list[dict], int, bool]:
-    scan_limit = max(0, min(settings.operation_scan_limit, MAX_OPERATION_SCAN_LIMIT))
-    if scan_limit == 0:
-        return [], scan_limit, False
-    url = f"{settings.horizon_url.rstrip('/')}/accounts/{address}/operations"
-    records = []
-    cursor = None
-    may_be_incomplete = False
-    while len(records) < scan_limit:
-        page_limit = min(HORIZON_OPERATION_PAGE_SIZE, scan_limit - len(records))
-        params = {"limit": page_limit, "order": "desc", "include_failed": "false"}
-        if cursor is not None:
-            params["cursor"] = cursor
-        payload = _get(url, params=params, settings=settings)
-        page = payload.get("_embedded", {}).get("records", [])
-        page_records = page[:page_limit]
-        if not page_records:
-            break
-        records.extend(page_records)
-        if len(records) >= scan_limit:
-            may_be_incomplete = len(page) >= page_limit
-            break
-        if len(page) < page_limit:
-            break
-        next_cursor = page_records[-1].get("id")
-        if next_cursor is None or str(next_cursor) == cursor:
-            may_be_incomplete = True
-            break
-        cursor = str(next_cursor)
-    return records, scan_limit, may_be_incomplete
-
-
 _RETRYABLE_STATUS_CODES = {408, 425, 429, 500, 502, 503, 504}
+HORIZON_OPERATION_PAGE_SIZE = 200
+_screening_cache = OrderedDict()
+_screening_cache_lock = threading.Lock()
+
+
+def clear_screening_cache() -> None:
+    """Clear the bounded in-process screening cache."""
+    with _screening_cache_lock:
+        _screening_cache.clear()
+
+
+def _cached_screening(key: tuple, ttl_seconds: int):
+    if ttl_seconds <= 0:
+        return None
+    now = time.monotonic()
+    with _screening_cache_lock:
+        entry = _screening_cache.get(key)
+        if entry is None:
+            return None
+        expires_at, result = entry
+        if expires_at <= now:
+            del _screening_cache[key]
+            return None
+        _screening_cache.move_to_end(key)
+        return copy.deepcopy(result)
+
+
+def _store_screening(key: tuple, result: dict, settings: Settings) -> None:
+    if settings.screening_cache_ttl_seconds <= 0:
+        return
+    with _screening_cache_lock:
+        _screening_cache[key] = (
+            time.monotonic() + settings.screening_cache_ttl_seconds,
+            copy.deepcopy(result),
+        )
+        _screening_cache.move_to_end(key)
+        while len(_screening_cache) > settings.screening_cache_max_entries:
+            _screening_cache.popitem(last=False)
 
 
 def _retry_after_seconds(response: httpx.Response, settings: Settings, attempt: int) -> float:
@@ -124,6 +131,25 @@ def _finite_float(value) -> float:
     except (TypeError, ValueError, OverflowError):
         return 0.0
     return parsed if math.isfinite(parsed) else 0.0
+
+
+def _public_endpoint(url: str) -> str:
+    """Remove credentials and opaque query data before exposing an endpoint URL."""
+    try:
+        parts = urlsplit(url)
+        hostname = parts.hostname
+    except ValueError:
+        return "[redacted]"
+    if hostname is None:
+        return f"{parts.scheme}://[redacted]" if parts.scheme else "[redacted]"
+    if ":" in hostname and not hostname.startswith("["):
+        hostname = f"[{hostname}]"
+    try:
+        port = parts.port
+    except ValueError:
+        return f"{parts.scheme}://[redacted]"
+    netloc = f"{hostname}:{port}" if port is not None else hostname
+    return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
 
 
 def _get(url: str, params: dict | None = None, settings: Settings | None = None) -> dict:
@@ -222,8 +248,63 @@ def _rpc(method: str, params: dict, settings: Settings | None = None) -> dict:
     return result
 
 
+def _scan_account_operations(address: str, settings: Settings) -> tuple[list[dict], int, bool]:
+    """Read the bounded recent-operation sample across Horizon pages."""
+    scan_limit = settings.operation_scan_limit
+    if scan_limit <= 0:
+        return [], scan_limit, False
+
+    url = f"{settings.horizon_url.rstrip('/')}/accounts/{address}/operations"
+    records: list[dict] = []
+    cursor: str | None = None
+    may_be_incomplete = False
+    while len(records) < scan_limit:
+        page_limit = min(HORIZON_OPERATION_PAGE_SIZE, scan_limit - len(records))
+        params = {"limit": page_limit, "order": "desc", "include_failed": "false"}
+        if cursor is not None:
+            params["cursor"] = cursor
+        payload = _get(url, params=params, settings=settings)
+        embedded = payload.get("_embedded")
+        page = embedded.get("records", []) if isinstance(embedded, dict) else []
+        if not isinstance(page, list) or not page:
+            break
+        page_records = [record for record in page[:page_limit] if isinstance(record, dict)]
+        if not page_records:
+            break
+        records.extend(page_records)
+
+        if len(records) >= scan_limit:
+            may_be_incomplete = len(page) >= page_limit
+            break
+        if len(page) < page_limit:
+            break
+
+        next_cursor = page_records[-1].get("id")
+        if next_cursor is None or str(next_cursor) == cursor:
+            may_be_incomplete = True
+            break
+        cursor = str(next_cursor)
+
+    return records, scan_limit, may_be_incomplete
+
+
 def score_account(address: str, settings: Settings | None = None) -> dict:
     settings = settings or get_settings()
+    key = (
+        settings.network_passphrase,
+        settings.horizon_url.rstrip("/"),
+        address,
+        settings.model_dump_json(),
+    )
+    cached = _cached_screening(key, settings.screening_cache_ttl_seconds)
+    if cached is not None:
+        return cached
+    result = _score_account_uncached(address, settings)
+    _store_screening(key, result, settings)
+    return copy.deepcopy(result)
+
+
+def _score_account_uncached(address: str, settings: Settings) -> dict:
     account = _get(f"{settings.horizon_url.rstrip('/')}/accounts/{address}", settings=settings)
     now = datetime.now(timezone.utc)
     window_start = now - timedelta(days=settings.activity_window_days)
@@ -268,10 +349,13 @@ def score_account(address: str, settings: Settings | None = None) -> dict:
                         "source": "Stellar Horizon account operations", "window": f"last {settings.activity_window_days} days"})
 
     if len(recent) >= settings.risk_activity_burst_min_operations:
+        operation_count = settings.risk_activity_burst_min_operations
+        operation_noun = "operation" if operation_count == 1 else "operations"
+        operation_verb = "was" if operation_count == 1 else "were"
         add_signal(
             "activity_burst", "High recent operation count", len(recent), "elevated",
             settings.risk_activity_burst_points,
-            f"At least {settings.risk_activity_burst_min_operations} operations were observed within the screening window.",
+            f"At least {operation_count} {operation_noun} {operation_verb} observed within the screening window.",
         )
     if volume >= settings.risk_transfer_volume_xlm_threshold:
         add_signal(
@@ -321,7 +405,7 @@ def score_account(address: str, settings: Settings | None = None) -> dict:
             "may_be_incomplete": may_be_incomplete,
         },
         "assets": assets,
-        "source": {"horizon_url": settings.horizon_url.rstrip("/"), "network": settings.network_passphrase,
+        "source": {"horizon_url": _public_endpoint(settings.horizon_url.rstrip("/")), "network": settings.network_passphrase,
                    "observed_at": now.isoformat()},
         "as_of": now.isoformat(),
         "on_chain_action": "none",
@@ -402,14 +486,14 @@ def list_account_operations(address: str, limit: int, cursor: str | None = None,
         "operations": [_normalize_operation(record) for record in records],
         "next_cursor": next_cursor,
         "limit": limit,
-        "source": {"horizon_url": settings.horizon_url.rstrip("/"), "network": settings.network_passphrase},
+        "source": {"horizon_url": _public_endpoint(settings.horizon_url.rstrip("/")), "network": settings.network_passphrase},
     }
 
 
 def network_status(settings: Settings | None = None) -> dict:
     settings = settings or get_settings()
     health = _rpc("getHealth", {}, settings)
-    return {"network": settings.network_passphrase, "rpc_url": settings.soroban_rpc_url,
+    return {"network": settings.network_passphrase, "rpc_url": _public_endpoint(settings.soroban_rpc_url),
             "status": health.get("status", "unknown"), "latest_ledger": health.get("latestLedger"),
             "oldest_ledger": health.get("oldestLedger"),
             "ledger_retention_window": health.get("ledgerRetentionWindow"),
@@ -436,14 +520,26 @@ def _native(value):
     return value
 
 
+def _bytes32_hex(value) -> str | None:
+    if isinstance(value, dict):
+        value = value.get("bytes")
+    if isinstance(value, str) and re.fullmatch(r"[0-9a-fA-F]{64}", value):
+        return value.lower()
+    return None
+
+
 def fetch_flag_event_page(limit: int, cursor: str | None = None,
                           settings: Settings | None = None) -> tuple[list[dict], str | None]:
     settings = settings or get_settings()
     if not settings.contract_id:
         raise HTTPException(status_code=503, detail="CONTRACT_ID is required to read Stellar Sentinel on-chain events")
     params = {
-        "filters": [{"type": "contract", "contractIds": [settings.contract_id],
-                     "topics": [[_symbol_scval("flagged"), "*", "*", "**"]]}],
+        "filters": [
+            {"type": "contract", "contractIds": [settings.contract_id],
+             "topics": [[_symbol_scval("flagged"), "*", "*", "**"]]},
+            {"type": "contract", "contractIds": [settings.contract_id],
+             "topics": [[_symbol_scval("flaggedv2"), "*", "*", "*"]]},
+        ],
         "pagination": {"limit": limit},
         "xdrFormat": "json",
     }
@@ -459,9 +555,11 @@ def fetch_flag_event_page(limit: int, cursor: str | None = None,
     output = []
     for event in result.get("events", []):
         topics = [_native(topic) for topic in event.get("topic", event.get("topics", []))]
+        is_v2 = bool(topics) and topics[0] == "flaggedv2"
         output.append({"id": event.get("id"), "ledger": event.get("ledger"),
                        "created_at": event.get("ledgerClosedAt"), "agent": topics[1] if len(topics) > 1 else None,
                        "subject": topics[2] if len(topics) > 2 else None, "score": _native(event.get("value")),
+                       "report_digest": _bytes32_hex(topics[3]) if is_v2 and len(topics) > 3 else None,
                        "contract_id": event.get("contractId", settings.contract_id), "tx_hash": event.get("txHash")})
     return output, result.get("cursor")
 
@@ -470,7 +568,7 @@ def list_flag_events(limit: int, cursor: str | None = None, settings: Settings |
     settings = settings or get_settings()
     output, next_cursor = fetch_flag_event_page(limit, cursor, settings)
     return {"events": output, "next_cursor": next_cursor,
-            "source": {"rpc_url": settings.soroban_rpc_url, "network": settings.network_passphrase,
+            "source": {"rpc_url": _public_endpoint(settings.soroban_rpc_url), "network": settings.network_passphrase,
                        "contract_id": settings.contract_id}}
 
 

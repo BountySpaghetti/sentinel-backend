@@ -2,24 +2,51 @@ import json
 from datetime import datetime, timezone
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 from fastapi import HTTPException
 
 from app import stellar
 from app.config import Settings
+from app.models import EventsResponse, NetworkStatusResponse, ScreeningResponse
 from app.main import app
+from app.stellar_address import is_valid_account_id
 
 client = TestClient(app)
-ADDRESS = "G" + "A" * 55
+ADDRESS = "GAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQDZ7H"
+MUXED_ADDRESS = "MABAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAKBZQ"
+
+
+@pytest.fixture(autouse=True)
+def reset_screening_cache():
+    stellar.clear_screening_cache()
+    yield
+    stellar.clear_screening_cache()
 
 
 def test_health_and_cors():
     assert client.get("/health").json() == {"status": "ok"}
+    security_headers = client.get("/health").headers
+    assert security_headers["x-content-type-options"] == "nosniff"
+    assert security_headers["x-frame-options"] == "DENY"
+    assert security_headers["referrer-policy"] == "no-referrer"
     assert client.get("/live").json() == {"status": "ok"}
     response = client.options("/risk/score", headers={"Origin": "http://localhost:3000", "Access-Control-Request-Method": "POST"})
     assert response.headers["access-control-allow-origin"] == "http://localhost:3000"
 
 
+def test_public_response_models_are_documented_with_examples():
+    schemas = client.get("/openapi.json").json()["components"]["schemas"]
+
+    assert schemas["ScreeningResponse"]["examples"]
+    assert schemas["EventsResponse"]["examples"]
+    assert schemas["NetworkStatusResponse"]["examples"]
+
+    assert ScreeningResponse.model_fields["score"].annotation is int
+    assert ScreeningResponse.model_fields["scoring_policy_version"].default == "1.0.0"
+    assert "activity_sample" in ScreeningResponse.model_fields
+    assert "events" in EventsResponse.model_fields
+    assert "status" in NetworkStatusResponse.model_fields
 def test_request_id_is_propagated_or_generated():
     accepted = client.get("/health", headers={"X-Request-ID": "trace_123-abc"})
     assert accepted.headers["x-request-id"] == "trace_123-abc"
@@ -30,6 +57,29 @@ def test_request_id_is_propagated_or_generated():
     rejected = client.get("/health", headers={"X-Request-ID": "bad id"})
     assert rejected.headers["x-request-id"] != "bad id"
     assert len(rejected.headers["x-request-id"]) == 32
+
+
+def test_classic_and_muxed_account_ids_are_checksum_validated(monkeypatch):
+    assert is_valid_account_id(ADDRESS)
+    assert is_valid_account_id(MUXED_ADDRESS)
+    assert len(ADDRESS) == 56
+    assert len(MUXED_ADDRESS) == 69
+
+    def fake_get(url, params=None, settings=None):
+        if url.endswith("/accounts/" + MUXED_ADDRESS):
+            return {"sequence": "10", "balances": []}
+        if url.endswith("/accounts/" + ADDRESS):
+            return {"sequence": "10", "balances": []}
+        return {"_embedded": {"records": []}}
+
+    monkeypatch.setattr(stellar, "_get", fake_get)
+    response = client.post("/risk/score", json={"address": MUXED_ADDRESS})
+    assert response.status_code == 200
+    assert response.json()["address"] == MUXED_ADDRESS
+
+    corrupted = MUXED_ADDRESS[:-2] + ("A" if MUXED_ADDRESS[-2] != "A" else "B") + MUXED_ADDRESS[-1]
+    assert not is_valid_account_id(corrupted)
+    assert client.post("/risk/score", json={"address": corrupted}).status_code == 422
 
 
 def test_request_log_uses_route_template_without_sensitive_inputs(caplog):
@@ -88,6 +138,7 @@ def test_score_uses_horizon_data_and_returns_bounded_explainable_signals(monkeyp
     response = client.post("/risk/score", json={"address": ADDRESS})
     assert response.status_code == 200
     payload = response.json()
+    assert response.headers["cache-control"] == "no-store"
     assert payload["score"] == 25
     assert payload["threshold_exceeded"] is False
     assert payload["metrics"]["transfer_volume_xlm"] == 12000
@@ -95,40 +146,156 @@ def test_score_uses_horizon_data_and_returns_bounded_explainable_signals(monkeyp
     assert client.post("/risk/score", json={"address": ADDRESS, "recent_tx_count": 10}).status_code == 422
 
 
+def test_score_reports_when_operation_sample_reaches_limit(monkeypatch):
+    record = {
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "type": "payment",
+        "source_account": ADDRESS,
+        "to": "G" + "B" * 55,
+        "asset_type": "native",
+        "amount": "1",
+    }
+    monkeypatch.setattr(stellar, "_get", lambda url, params=None, settings=None: (
+        {"sequence": "20", "balances": []}
+        if url.endswith("/accounts/" + ADDRESS)
+        else {"_embedded": {"records": [record, record, record]}}
+    ))
+
+    full_sample = stellar.score_account(
+        ADDRESS, settings=Settings(operation_scan_limit=3),
+    )["activity_sample"]
+    short_sample = stellar.score_account(
+        ADDRESS, settings=Settings(operation_scan_limit=4),
+    )["activity_sample"]
+
+    assert full_sample == {
+        "operations_scanned": 3,
+        "scan_limit": 3,
+        "may_be_incomplete": True,
+    }
+    assert short_sample["operations_scanned"] == 3
+    assert short_sample["may_be_incomplete"] is False
+
+
 def test_score_paginates_operations_within_total_scan_cap(monkeypatch):
     created_at = datetime.now(timezone.utc).isoformat()
+
     def operation(operation_id):
         return {
-            "id": str(operation_id), "created_at": created_at,
-            "type": "payment", "source_account": ADDRESS,
-            "to": "G" + "B" * 55, "asset_type": "native", "amount": "1",
+            "id": str(operation_id),
+            "created_at": created_at,
+            "type": "payment",
+            "source_account": ADDRESS,
+            "to": "G" + "B" * 55,
+            "asset_type": "native",
+            "amount": "1",
         }
-    pages = [[operation(index) for index in range(200)], [operation(index) for index in range(200, 250)]]
+
+    pages = [
+        [operation(index) for index in range(200)],
+        [operation(index) for index in range(200, 250)],
+    ]
     calls = []
+
     def fake_get(url, params=None, settings=None):
         if url.endswith("/accounts/" + ADDRESS):
             return {"sequence": "100", "balances": []}
         calls.append(params)
         return {"_embedded": {"records": pages.pop(0)}}
+
     monkeypatch.setattr(stellar, "_get", fake_get)
     result = stellar.score_account(ADDRESS, settings=Settings(operation_scan_limit=250))
+
     assert [call["limit"] for call in calls] == [200, 50]
     assert calls[1]["cursor"] == "199"
     assert result["metrics"]["operations_scanned"] == 250
-    assert result["activity_sample"] == {"operations_scanned": 250, "scan_limit": 250, "may_be_incomplete": True}
+    assert result["activity_sample"] == {
+        "operations_scanned": 250,
+        "scan_limit": 250,
+        "may_be_incomplete": True,
+    }
 
 
 def test_short_horizon_page_marks_scan_complete(monkeypatch):
     records = [{"id": str(index)} for index in range(10)]
     monkeypatch.setattr(stellar, "_get", lambda url, params=None, settings=None: (
-        {"sequence": "100", "balances": []} if url.endswith("/accounts/" + ADDRESS)
+        {"sequence": "100", "balances": []}
+        if url.endswith("/accounts/" + ADDRESS)
         else {"_embedded": {"records": records}}
     ))
+
     result = stellar.score_account(ADDRESS, settings=Settings(operation_scan_limit=250))
+
     assert result["activity_sample"]["operations_scanned"] == 10
     assert result["activity_sample"]["may_be_incomplete"] is False
 
 
+def test_screening_cache_reuses_results_and_returns_independent_copies(monkeypatch):
+    calls = []
+
+    def fake_get(url, params=None, settings=None):
+        calls.append(url)
+        if url.endswith("/accounts/" + ADDRESS):
+            return {"sequence": "10", "balances": []}
+        return {"_embedded": {"records": []}}
+
+    monkeypatch.setattr(stellar, "_get", fake_get)
+    settings = Settings(screening_cache_ttl_seconds=15)
+
+    first = stellar.score_account(ADDRESS, settings=settings)
+    first["score"] = 99
+    second = stellar.score_account(ADDRESS, settings=settings)
+
+    assert len(calls) == 2
+    assert second["score"] == 0
+
+
+def test_screening_cache_expires_and_isolated_by_network(monkeypatch):
+    calls = []
+    clock = {"now": 100.0}
+
+    def fake_get(url, params=None, settings=None):
+        calls.append(url)
+        if url.endswith("/accounts/" + ADDRESS):
+            return {"sequence": "10", "balances": []}
+        return {"_embedded": {"records": []}}
+
+    monkeypatch.setattr(stellar, "_get", fake_get)
+    monkeypatch.setattr(stellar.time, "monotonic", lambda: clock["now"])
+    default = Settings(screening_cache_ttl_seconds=5)
+    stellar.score_account(ADDRESS, settings=default)
+    clock["now"] = 106.0
+    stellar.score_account(ADDRESS, settings=default)
+    stellar.score_account(ADDRESS, settings=Settings(
+        network_passphrase="Different network",
+        screening_cache_ttl_seconds=5,
+    ))
+
+    assert len(calls) == 6
+
+
+def test_screening_cache_entry_limit_and_zero_ttl(monkeypatch):
+    calls = []
+    second_address = "G" + "C" * 55
+
+    def fake_get(url, params=None, settings=None):
+        calls.append(url)
+        if "/accounts/" in url:
+            return {"sequence": "10", "balances": []}
+        return {"_embedded": {"records": []}}
+
+    monkeypatch.setattr(stellar, "_get", fake_get)
+    bounded = Settings(screening_cache_ttl_seconds=15, screening_cache_max_entries=1)
+    stellar.score_account(ADDRESS, settings=bounded)
+    stellar.score_account(second_address, settings=bounded)
+    stellar.score_account(ADDRESS, settings=bounded)
+    assert len(calls) == 6
+
+    calls.clear()
+    disabled = Settings(screening_cache_ttl_seconds=0)
+    stellar.score_account(ADDRESS, settings=disabled)
+    stellar.score_account(ADDRESS, settings=disabled)
+    assert len(calls) == 4
 def test_screening_response_includes_configured_policy_version(monkeypatch):
     monkeypatch.setattr(stellar, "_get", lambda url, params=None, settings=None: (
         {"sequence": "10", "balances": []}
@@ -142,19 +309,33 @@ def test_screening_response_includes_configured_policy_version(monkeypatch):
 def test_risk_thresholds_and_weights_are_configurable_and_bounded(monkeypatch):
     recent = datetime.now(timezone.utc).isoformat()
     monkeypatch.setattr(stellar, "_get", lambda url, params=None, settings=None: (
-        {"sequence": "50", "balances": []} if url.endswith("/accounts/" + ADDRESS)
-        else {"_embedded": {"records": [{"created_at": recent, "type": "payment", "source_account": ADDRESS,
-            "to": "G" + "B" * 55, "asset_type": "native", "amount": "120"}]}}
+        {"sequence": "50", "balances": []}
+        if url.endswith("/accounts/" + ADDRESS)
+        else {"_embedded": {"records": [{
+            "created_at": recent,
+            "type": "payment",
+            "source_account": ADDRESS,
+            "to": "G" + "B" * 55,
+            "asset_type": "native",
+            "amount": "120",
+        }]}}
     ))
-    settings = Settings(risk_activity_burst_min_operations=1, risk_activity_burst_points=50,
-        risk_transfer_volume_xlm_threshold=100, risk_transfer_volume_points=80,
-        risk_high_score_threshold=60, risk_elevated_score_threshold=30)
+    settings = Settings(
+        risk_activity_burst_min_operations=1,
+        risk_activity_burst_points=50,
+        risk_transfer_volume_xlm_threshold=100,
+        risk_transfer_volume_points=80,
+        risk_high_score_threshold=60,
+        risk_elevated_score_threshold=30,
+    )
+
     result = stellar.score_account(ADDRESS, settings=settings)
+
     assert result["score"] == 100
     assert result["risk_level"] == "high"
     assert result["threshold"] == 60
     assert result["threshold_exceeded"] is True
-    assert "at least 1 operations" in result["signals"][0]["explanation"]
+    assert "At least 1 operation was observed" in result["signals"][0]["explanation"]
 
 
 def test_events_requires_contract_id():
@@ -174,15 +355,24 @@ def test_events_filter_and_decode(monkeypatch):
         calls.append((method, params))
         if method == "getHealth":
             return {"latestLedger": 100000, "oldestLedger": 80000}
-        return {"events": [{"id": "id1", "ledger": 99999, "ledgerClosedAt": "now", "contractId": selected.contract_id,
-                            "topic": [{"symbol": "flagged"}, {"address": {"accountId": "agent"}},
-                                      {"address": {"accountId": "subject"}}], "value": {"u32": 82}}], "cursor": "opaque"}
+        digest = "ABCDEF0123456789" * 4
+        return {"events": [
+            {"id": "id1", "ledger": 99999, "ledgerClosedAt": "now", "contractId": selected.contract_id,
+             "topic": [{"symbol": "flagged"}, {"address": {"accountId": "agent"}},
+                       {"address": {"accountId": "subject"}}], "value": {"u32": 82}},
+            {"id": "id2", "ledger": 99999, "ledgerClosedAt": "now", "contractId": selected.contract_id,
+             "topic": [{"symbol": "flaggedv2"}, {"address": {"accountId": "agent"}},
+                       {"address": {"accountId": "subject"}}, {"bytes": digest}], "value": {"u32": 91}},
+        ], "cursor": "opaque"}
     monkeypatch.setattr(stellar, "_rpc", fake_rpc)
     result = stellar.list_flag_events(15, settings=settings)
     assert result["events"][0]["agent"] == "agent"
     assert result["events"][0]["subject"] == "subject"
     assert result["events"][0]["score"] == 82
+    assert result["events"][0]["report_digest"] is None
+    assert result["events"][1]["report_digest"] == "abcdef0123456789" * 4
     assert calls[1][1]["filters"][0]["contractIds"] == [settings.contract_id]
+    assert len(calls[1][1]["filters"]) == 2
     assert calls[1][1]["startLedger"] == 80000
     assert result["next_cursor"] == "opaque"
 
@@ -242,11 +432,19 @@ def test_upstream_requests_use_one_managed_client():
 
         def get(self, url, **kwargs):
             self.calls.append(("GET", url, kwargs))
-            return httpx.Response(200, json={"fee_stats": True})
+            return httpx.Response(
+                200,
+                json={"fee_stats": True},
+                request=httpx.Request("GET", url),
+            )
 
         def post(self, url, **kwargs):
             self.calls.append(("POST", url, kwargs))
-            return httpx.Response(200, json={"result": {"status": "healthy"}})
+            return httpx.Response(
+                200,
+                json={"result": {"status": "healthy"}},
+                request=httpx.Request("POST", url),
+            )
 
         def close(self):
             self.closed = True

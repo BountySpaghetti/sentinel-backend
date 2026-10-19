@@ -6,9 +6,12 @@ import httpx
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import get_settings
+from app.middleware.api_key import ApiKeyMiddleware
 from app.middleware.rate_limit import ScreeningRateLimitMiddleware
+from app.middleware.security_headers import SecurityHeadersMiddleware
 from app.stellar import close_http_client, network_status, set_http_client, sync_flag_events
 from app.routers import accounts, health, events, risk
+from app.models import NetworkStatusResponse
 from app.request_id import RequestIDMiddleware
 from app.request_logging import RequestLoggingMiddleware
 from app.event_store import get_event_store
@@ -70,8 +73,11 @@ app.add_middleware(
     allow_headers=["Content-Type", "Authorization"],
     expose_headers=["Retry-After", "X-RateLimit-Limit", "X-RateLimit-Remaining"],
 )
+if settings.api_key:
+    app.add_middleware(ApiKeyMiddleware, api_key=settings.api_key)
 app.add_middleware(RequestIDMiddleware)
 app.add_middleware(RequestLoggingMiddleware)
+app.add_middleware(SecurityHeadersMiddleware)
 
 app.include_router(health.router)
 app.include_router(accounts.router, prefix="/accounts", tags=["accounts"])
@@ -79,7 +85,7 @@ app.include_router(events.router, prefix="/events", tags=["events"])
 app.include_router(risk.router, prefix="/risk", tags=["risk"])
 
 
-@app.get("/network/status", tags=["network"])
+@app.get("/network/status", tags=["network"], response_model=NetworkStatusResponse)
 def get_network_status():
     """Report Soroban RPC health and the RPC's current retained ledger window."""
     return network_status()
